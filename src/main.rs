@@ -1,6 +1,9 @@
-use std::{path::PathBuf, str::FromStr};
+#![feature(never_type)]
+
+use std::path::PathBuf;
 use structopt::*;
 
+mod ast;
 mod verify;
 
 #[derive(Debug, StructOpt)]
@@ -16,7 +19,7 @@ enum Command {
 
 #[derive(Debug, StructOpt)]
 struct VerifyOpts {
-    file: PathBuf,
+    file: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -24,19 +27,45 @@ fn main() -> anyhow::Result<()> {
 
     match opts.command {
         Command::Verify(verify_opts) => {
-            let contents = std::fs::read_to_string(&verify_opts.file)?;
-            let ast: Ast = contents.parse()?;
+            let processed = preprocess(&format!("$[ {} $]", verify_opts.file))?;
+            let ast = ast::parse(&processed)?;
             verify::verify(ast)
         }
     }
 }
 
-pub enum Ast {}
+fn preprocess(s: &str) -> anyhow::Result<String> {
+    let s = strip_comments(s)?;
+    let mut s = s.as_str();
 
-impl FromStr for Ast {
-    type Err = anyhow::Error;
+    let mut result = String::new();
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        todo!()
+    while let Some((pre, post)) = s.split_once("$[ ") {
+        result += pre;
+        let (file, post) = post
+            .split_once(" $]")
+            .ok_or(anyhow::anyhow!("Opening import without closing import"))?;
+
+        result += &preprocess(std::fs::read_to_string(file)?.as_str())?;
+
+        s = post;
     }
+
+    result += s;
+    Ok(result)
+}
+
+fn strip_comments(mut s: &str) -> anyhow::Result<String> {
+    let mut result = String::new();
+
+    while let Some((pre, post)) = s.split_once("$(") {
+        result += pre;
+        s = post
+            .split_once("$)")
+            .ok_or(anyhow::anyhow!("Opening comment without closing comment"))?
+            .1;
+    }
+
+    result += s;
+    Ok(result)
 }

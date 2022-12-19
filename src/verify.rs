@@ -1,5 +1,5 @@
-use super::*;
+use crate::ast::Stmt;
 
-pub fn verify(ast: Ast) -> anyhow::Result<()> {
+pub fn verify(_stmts: Vec<Stmt>) -> anyhow::Result<()> {
     todo!()
 }
