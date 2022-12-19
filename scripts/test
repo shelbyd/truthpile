@@ -1,0 +1,17 @@
+#! /bin/bash
+
+set -euo pipefail
+
+mkdir -p target/
+
+if [ ! -d target/metamath-test ]; then
+	pushd target/
+	git clone https://github.com/david-a-wheeler/metamath-test
+	popd
+fi
+
+cargo test
+cargo build
+
+pushd target/metamath-test
+./run-testsuite '../debug/truthpile verify'
