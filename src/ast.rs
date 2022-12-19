@@ -1,8 +1,6 @@
 use logos::*;
 use nom::{
     branch::*,
-    bytes::complete::*,
-    character::complete::*,
     combinator::*,
     error::{Error, ErrorKind},
     multi::*,

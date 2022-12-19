@@ -1,6 +1,3 @@
-#![feature(never_type)]
-
-use std::path::PathBuf;
 use structopt::*;
 
 mod ast;
