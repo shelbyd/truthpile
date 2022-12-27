@@ -38,7 +38,12 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
                 // TODO(shelbyd): Check var is a var.
                 ops.insert(
                     f.name,
-                    Operation::PushExact(statement(&f.type_code, vec![f.var])),
+                    Unify {
+                        vars: OrderedVars::default(),
+                        type_code: f.type_code,
+                        symbols: vec![f.var],
+                        hypotheses: vec![],
+                    },
                 );
             }
             Stmt::Axiom(a) => {
@@ -52,7 +57,7 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
 
                 ops.insert(
                     a.name,
-                    Operation::Unify {
+                    Unify {
                         vars: axiom_vars,
                         type_code: a.type_code,
                         symbols: a.symbols,
@@ -74,60 +79,9 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
                 let mut stack = Vec::<String>::new();
 
                 for step in p.proof {
-                    let op = ops.get(&step).ok_or(Error::UnrecognizedLabel(step))?;
-                    match op {
-                        Operation::PushExact(s) => stack.push(s.clone()),
-
-                        Operation::Unify {
-                            vars,
-                            type_code,
-                            symbols,
-                            hypotheses,
-                        } => {
-                            let hypotheses_proofs = hypotheses
-                                .iter()
-                                .rev()
-                                .map(|h| {
-                                    let statement = stack
-                                        .pop()
-                                        .ok_or_else(|| Error::ExhaustedStack(h.to_string()))?;
-                                    Ok((h, statement))
-                                })
-                                .collect::<Result<Vec<_>, _>>()?;
-
-                            let mut replacements = HashMap::<String, String>::new();
-
-                            for var in vars.rev_iter() {
-                                // TODO(shelbyd): Check typeclass.
-                                let top = stack
-                                    .pop()
-                                    .ok_or_else(|| Error::ExhaustedStack(var.to_string()))?;
-                                let suff = top.split_once(" ").unwrap().1;
-                                replacements.insert(var.to_string(), suff.to_string());
-                            }
-
-                            for (hypothesis, provided) in hypotheses_proofs {
-                                let hypothesis = all_hypotheses
-                                    .iter()
-                                    .find(|h| h.label == *hypothesis)
-                                    .unwrap();
-
-                                let expected = statement(
-                                    &hypothesis.type_code,
-                                    replace(&hypothesis.symbols, &replacements),
-                                );
-
-                                if expected != provided {
-                                    return Err(Error::MismatchedStep {
-                                        expected,
-                                        got: provided,
-                                    });
-                                }
-                            }
-
-                            stack.push(statement(type_code, replace(symbols, &replacements)));
-                        }
-                    }
+                    ops.get(&step)
+                        .ok_or(Error::UnrecognizedLabel(step))?
+                        .apply_to(&mut stack, &all_hypotheses)?;
                 }
 
                 let target = statement(&p.type_code, p.symbols);
@@ -137,24 +91,74 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
                 }
             }
 
-            _ => {
-                dbg!(stmt);
-            }
+            _ => todo!("{stmt:?}"),
         }
     }
     Ok(())
 }
 
-#[derive(Debug)]
-enum Operation {
-    PushExact(String),
+#[derive(Debug, Clone)]
+struct Unify {
+    vars: OrderedVars,
+    type_code: String,
+    symbols: Vec<String>,
+    hypotheses: Vec<String>,
+}
 
-    Unify {
-        vars: OrderedVars,
-        type_code: String,
-        symbols: Vec<String>,
-        hypotheses: Vec<String>,
-    },
+impl Unify {
+    fn apply_to(
+        &self,
+        stack: &mut Vec<String>,
+        all_hypotheses: &Vec<Hypothesis>,
+    ) -> Result<(), Error> {
+        let hypotheses_proofs = self
+            .hypotheses
+            .iter()
+            .rev()
+            .map(|h| {
+                let statement = stack
+                    .pop()
+                    .ok_or_else(|| Error::ExhaustedStack(h.to_string()))?;
+                Ok((h, statement))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut replacements = HashMap::<String, String>::new();
+
+        for var in self.vars.rev_iter() {
+            // TODO(shelbyd): Check typeclass.
+            let top = stack
+                .pop()
+                .ok_or_else(|| Error::ExhaustedStack(var.to_string()))?;
+            let suff = top.split_once(" ").unwrap().1;
+            replacements.insert(var.to_string(), suff.to_string());
+        }
+
+        for (hypothesis, provided) in hypotheses_proofs {
+            let hypothesis = all_hypotheses
+                .iter()
+                .find(|h| h.label == *hypothesis)
+                .unwrap();
+
+            let expected = statement(
+                &hypothesis.type_code,
+                replace(&hypothesis.symbols, &replacements),
+            );
+
+            if expected != provided {
+                return Err(Error::MismatchedStep {
+                    expected,
+                    got: provided,
+                });
+            }
+        }
+
+        stack.push(statement(
+            &self.type_code,
+            replace(&self.symbols, &replacements),
+        ));
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -181,7 +185,7 @@ fn statement(type_code: &str, replacements: Vec<String>) -> String {
     format!("{type_code} {}", replacements.join(" "))
 }
 
-#[derive(Debug, PartialEq, Eq, Default)]
+#[derive(Debug, PartialEq, Eq, Default, Clone)]
 struct OrderedVars {
     vars: Vec<String>,
 }
