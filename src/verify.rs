@@ -38,24 +38,22 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
                 // TODO(shelbyd): Check var is a var.
                 ops.insert(
                     f.name,
-                    Operation::PushExact(format!("{} {}", f.type_code, f.var)),
+                    Operation::PushExact(statement(&f.type_code, vec![f.var])),
                 );
             }
             Stmt::Axiom(a) => {
-                let direct_vars = a.symbols.iter().filter(|s| vars.contains(*s));
-                let hypo_vars = all_hypotheses.iter().flat_map(|h| &h.vars);
+                let direct_vars = OrderedVars::extract_with(&a.symbols, &vars);
+                let hypo_vars: OrderedVars = all_hypotheses
+                    .iter()
+                    .map(|h| &h.vars)
+                    .fold(OrderedVars::default(), |acc, v| acc + v);
 
-                let vars = std::iter::empty()
-                    .chain(hypo_vars)
-                    .chain(direct_vars)
-                    .unique()
-                    .cloned()
-                    .collect();
+                let axiom_vars = hypo_vars + direct_vars;
 
                 ops.insert(
                     a.name,
                     Operation::Unify {
-                        vars,
+                        vars: axiom_vars,
                         type_code: a.type_code,
                         symbols: a.symbols,
                         hypotheses: all_hypotheses.iter().map(|h| h.label.clone()).collect(),
@@ -67,24 +65,17 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
                 all_hypotheses.push(Hypothesis {
                     label: h.name,
                     type_code: h.type_code,
-                    vars: h
-                        .symbols
-                        .iter()
-                        .filter(|s| vars.contains(*s))
-                        .unique()
-                        .cloned()
-                        .collect(),
+                    vars: OrderedVars::extract_with(&h.symbols, &vars),
                     symbols: h.symbols,
                 });
             }
 
             Stmt::Proof(p) => {
-                let target = format!("{} {}", p.type_code, p.symbols.join(" "));
-
                 let mut stack = Vec::<String>::new();
+
                 for step in p.proof {
-                    let labeled = ops.get(&step).ok_or(Error::UnrecognizedLabel(step))?;
-                    match labeled {
+                    let op = ops.get(&step).ok_or(Error::UnrecognizedLabel(step))?;
+                    match op {
                         Operation::PushExact(s) => stack.push(s.clone()),
 
                         Operation::Unify {
@@ -93,8 +84,6 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
                             symbols,
                             hypotheses,
                         } => {
-                            let mut replacements = HashMap::<String, String>::new();
-
                             let hypotheses_proofs = hypotheses
                                 .iter()
                                 .rev()
@@ -106,7 +95,9 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
                                 })
                                 .collect::<Result<Vec<_>, _>>()?;
 
-                            for var in vars.iter().rev() {
+                            let mut replacements = HashMap::<String, String>::new();
+
+                            for var in vars.rev_iter() {
                                 // TODO(shelbyd): Check typeclass.
                                 let top = stack
                                     .pop()
@@ -115,35 +106,31 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
                                 replacements.insert(var.to_string(), suff.to_string());
                             }
 
-                            for (hypothesis, statement) in hypotheses_proofs {
+                            for (hypothesis, provided) in hypotheses_proofs {
                                 let hypothesis = all_hypotheses
                                     .iter()
                                     .find(|h| h.label == *hypothesis)
                                     .unwrap();
-                                let replaced = hypothesis
-                                    .symbols
-                                    .iter()
-                                    .map(|s| replacements.get(s).unwrap_or(s).as_str())
-                                    .collect::<Vec<_>>();
-                                let expected =
-                                    format!("{} {}", hypothesis.type_code, replaced.join(" "));
-                                if expected != statement {
+
+                                let expected = statement(
+                                    &hypothesis.type_code,
+                                    replace(&hypothesis.symbols, &replacements),
+                                );
+
+                                if expected != provided {
                                     return Err(Error::MismatchedStep {
                                         expected,
-                                        got: statement,
+                                        got: provided,
                                     });
                                 }
                             }
 
-                            let replaced = symbols
-                                .iter()
-                                .map(|s| replacements.get(s).unwrap_or(s).as_str())
-                                .collect::<Vec<_>>();
-                            stack.push(format!("{type_code} {}", replaced.join(" ")));
+                            stack.push(statement(type_code, replace(symbols, &replacements)));
                         }
                     }
                 }
 
+                let target = statement(&p.type_code, p.symbols);
                 if stack != vec![target] {
                     dbg!(&stack);
                     return Err(Error::MismatchedStack(p.name));
@@ -163,7 +150,7 @@ enum Operation {
     PushExact(String),
 
     Unify {
-        vars: Vec<String>,
+        vars: OrderedVars,
         type_code: String,
         symbols: Vec<String>,
         hypotheses: Vec<String>,
@@ -175,7 +162,62 @@ struct Hypothesis {
     label: String,
     type_code: String,
     symbols: Vec<String>,
+    vars: OrderedVars,
+}
+
+fn replace(syms: &[impl AsRef<str>], replacements: &HashMap<String, String>) -> Vec<String> {
+    syms.iter()
+        .map(|s| s.as_ref())
+        .map(|s| {
+            replacements
+                .get(s)
+                .cloned()
+                .unwrap_or_else(|| s.to_string())
+        })
+        .collect::<Vec<_>>()
+}
+
+fn statement(type_code: &str, replacements: Vec<String>) -> String {
+    format!("{type_code} {}", replacements.join(" "))
+}
+
+#[derive(Debug, PartialEq, Eq, Default)]
+struct OrderedVars {
     vars: Vec<String>,
+}
+
+impl OrderedVars {
+    fn extract_with(syms: &[impl AsRef<str>], vars: &HashSet<String>) -> Self {
+        OrderedVars {
+            vars: syms
+                .iter()
+                .map(|s| s.as_ref())
+                .filter(|s| vars.contains(*s))
+                .unique() // TODO(shelbyd): Test that requires unique
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
+
+    fn rev_iter(&self) -> impl Iterator<Item = &str> {
+        self.vars.iter().rev().map(|s| s.as_str())
+    }
+}
+
+impl<O> core::ops::Add<O> for OrderedVars
+where
+    O: core::borrow::Borrow<OrderedVars>,
+{
+    type Output = OrderedVars;
+
+    fn add(mut self, rhs: O) -> Self::Output {
+        for var in &rhs.borrow().vars {
+            if !self.vars.contains(&var) {
+                self.vars.push(var.to_string());
+            }
+        }
+        self
+    }
 }
 
 #[cfg(test)]
