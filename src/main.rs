@@ -26,7 +26,8 @@ fn main() -> anyhow::Result<()> {
         Command::Verify(verify_opts) => {
             let processed = preprocess(&format!("$[ {} $]", verify_opts.file))?;
             let ast = ast::parse(&processed)?;
-            verify::verify(ast)
+            verify::verify(ast)?;
+            Ok(())
         }
     }
 }

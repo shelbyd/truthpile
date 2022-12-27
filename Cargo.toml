@@ -7,6 +7,8 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.68"
+itertools = "0.10.5"
 logos = "0.12.1"
 nom = "7.1.1"
 structopt = "0.3.26"
+thiserror = "1.0.38"

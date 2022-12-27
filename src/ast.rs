@@ -14,7 +14,7 @@ pub enum Stmt {
     VarDecl(Vec<String>),
     Disjoint(Vec<String>),
 
-    FloatingHypothesis(FloatingHypothesis),
+    VarTypeDecl(FloatingHypothesis),
     LogicalHypothesis(Expr),
     Axiom(Expr),
     Proof(Proof),
@@ -127,7 +127,7 @@ fn func(t: Toks) -> IResult<Toks, Stmt> {
 
     Ok((
         t,
-        Stmt::FloatingHypothesis(FloatingHypothesis {
+        Stmt::VarTypeDecl(FloatingHypothesis {
             name: name.to_string(),
             type_code: type_code.to_string(),
             var: var.to_string(),

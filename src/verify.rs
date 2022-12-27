@@ -1,141 +1,360 @@
+use itertools::*;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::Stmt;
 
-pub fn verify(stmts: Vec<Stmt>) -> anyhow::Result<()> {
-    Verifier::new().verify_block(stmts)
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+pub enum Error {
+    #[error("mismatched final stack for: {0}")]
+    MismatchedStack(String),
+
+    #[error("unrecognized label: {0}")]
+    UnrecognizedLabel(String),
+
+    #[error("exhausted stack trying to resolve: {0}")]
+    ExhaustedStack(String),
+
+    #[error("mismatched step, expected \n  {expected}\ngot \n  {got}")]
+    MismatchedStep { expected: String, got: String },
 }
 
-type TypeClass = String;
-type Con = String;
-type Var = String;
-type Lab = String;
-type Sym = String; // (Con || Var)
+pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
+    // let mut consts = Vec::new();
+    let mut vars = HashSet::new();
+    let mut all_hypotheses = Vec::<Hypothesis>::new();
 
-#[derive(Default, Debug)]
-struct Verifier {
-    consts: HashSet<Con>,
+    let mut ops = HashMap::new();
 
-    vars: HashSet<Var>,
-
-    type_classes: HashMap<Var, TypeClass>,
-    type_class_defs: HashMap<Lab, (TypeClass, Var)>,
-
-    theorems: HashMap<Lab, Theorem>,
-}
-
-#[derive(Debug)]
-struct Theorem {
-    type_class: TypeClass,
-    symbols: Vec<Sym>,
-}
-
-impl Verifier {
-    fn new() -> Self {
-        Default::default()
-    }
-
-    fn verify(&mut self, stmt: Stmt) -> anyhow::Result<()> {
+    let flattened = stmts.into_iter().flat_map(|s| match s {
+        Stmt::Block(b) => b,
+        _ => vec![s],
+    });
+    for stmt in flattened {
         match stmt {
-            Stmt::ConstantDecl(consts) => {
-                self.consts.extend(consts);
-            }
-            Stmt::VarDecl(vars) => {
-                self.vars.extend(vars);
-            }
+            Stmt::ConstantDecl(_) => {}
+            Stmt::VarDecl(v) => vars.extend(v),
 
-            Stmt::FloatingHypothesis(h) => {
-                self.type_classes.insert(h.var.clone(), h.type_code.clone());
-                self.type_class_defs.insert(h.name, (h.type_code, h.var));
+            Stmt::VarTypeDecl(f) => {
+                // TODO(shelbyd): Check var is a var.
+                ops.insert(
+                    f.name,
+                    Operation::PushExact(format!("{} {}", f.type_code, f.var)),
+                );
             }
-            Stmt::LogicalHypothesis(_expr) => {
-                dbg!(_expr);
-            }
-
             Stmt::Axiom(a) => {
-                self.theorems.insert(
+                let direct_vars = a.symbols.iter().filter(|s| vars.contains(*s));
+                let hypo_vars = all_hypotheses.iter().flat_map(|h| &h.vars);
+
+                let vars = std::iter::empty()
+                    .chain(hypo_vars)
+                    .chain(direct_vars)
+                    .unique()
+                    .cloned()
+                    .collect();
+
+                ops.insert(
                     a.name,
-                    Theorem {
-                        type_class: a.type_code,
+                    Operation::Unify {
+                        vars,
+                        type_code: a.type_code,
                         symbols: a.symbols,
+                        hypotheses: all_hypotheses.iter().map(|h| h.label.clone()).collect(),
                     },
                 );
             }
-            Stmt::Block(b) => self.verify_block(b)?,
+
+            Stmt::LogicalHypothesis(h) => {
+                all_hypotheses.push(Hypothesis {
+                    label: h.name,
+                    type_code: h.type_code,
+                    vars: h
+                        .symbols
+                        .iter()
+                        .filter(|s| vars.contains(*s))
+                        .unique()
+                        .cloned()
+                        .collect(),
+                    symbols: h.symbols,
+                });
+            }
 
             Stmt::Proof(p) => {
-                let reduced = self.reduce(p.proof)?;
-                unimplemented!("{:?}", reduced);
-            }
+                let target = format!("{} {}", p.type_code, p.symbols.join(" "));
 
-            u => {
-                unimplemented!("{:?}", u);
-            }
-        }
+                let mut stack = Vec::<String>::new();
+                for step in p.proof {
+                    let labeled = ops.get(&step).ok_or(Error::UnrecognizedLabel(step))?;
+                    match labeled {
+                        Operation::PushExact(s) => stack.push(s.clone()),
 
-        Ok(())
-    }
+                        Operation::Unify {
+                            vars,
+                            type_code,
+                            symbols,
+                            hypotheses,
+                        } => {
+                            let mut replacements = HashMap::<String, String>::new();
 
-    fn verify_block(&mut self, block: Vec<Stmt>) -> anyhow::Result<()> {
-        for stmt in block {
-            self.verify(stmt)?;
-        }
-        Ok(())
-    }
+                            let hypotheses_proofs = hypotheses
+                                .iter()
+                                .rev()
+                                .map(|h| {
+                                    let statement = stack
+                                        .pop()
+                                        .ok_or_else(|| Error::ExhaustedStack(h.to_string()))?;
+                                    Ok((h, statement))
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
 
-    fn reduce(&self, syms: Vec<Sym>) -> anyhow::Result<Vec<Sym>> {
-        let mut stack = Vec::new();
+                            for var in vars.iter().rev() {
+                                // TODO(shelbyd): Check typeclass.
+                                let top = stack
+                                    .pop()
+                                    .ok_or_else(|| Error::ExhaustedStack(var.to_string()))?;
+                                let suff = top.split_once(" ").unwrap().1;
+                                replacements.insert(var.to_string(), suff.to_string());
+                            }
 
-        for sym in syms {
-            dbg!(&stack, &sym);
+                            for (hypothesis, statement) in hypotheses_proofs {
+                                let hypothesis = all_hypotheses
+                                    .iter()
+                                    .find(|h| h.label == *hypothesis)
+                                    .unwrap();
+                                let replaced = hypothesis
+                                    .symbols
+                                    .iter()
+                                    .map(|s| replacements.get(s).unwrap_or(s).as_str())
+                                    .collect::<Vec<_>>();
+                                let expected =
+                                    format!("{} {}", hypothesis.type_code, replaced.join(" "));
+                                if expected != statement {
+                                    return Err(Error::MismatchedStep {
+                                        expected,
+                                        got: statement,
+                                    });
+                                }
+                            }
 
-            if let Some((type_class, var)) = self.type_class_defs.get(&sym) {
-                stack.push(format!("{type_class} {var}"));
-                continue;
-            }
-
-            if let Some(theorem) = self.theorems.get(&sym) {
-                let vars = theorem
-                    .symbols
-                    .iter()
-                    .filter_map(|s| self.vars.get(s))
-                    .rev()
-                    .collect::<Vec<_>>();
-
-                let mut replacements = HashMap::new();
-                for var in vars {
-                    if let Some(_) = replacements.get(var) {
-                        continue;
+                            let replaced = symbols
+                                .iter()
+                                .map(|s| replacements.get(s).unwrap_or(s).as_str())
+                                .collect::<Vec<_>>();
+                            stack.push(format!("{type_code} {}", replaced.join(" ")));
+                        }
                     }
-
-                    let top = stack.pop().ok_or(anyhow::anyhow!("Stack exhausted"))?;
-                    let expected_class = self
-                        .type_classes
-                        .get(var)
-                        .ok_or(anyhow::anyhow!("Unrecognized variable: {var:?}"))?;
-
-                    let replacement =
-                        top.strip_prefix(&format!("{expected_class} "))
-                            .ok_or(anyhow::anyhow!(
-                                "Expected type_class {expected_class:?}, found {top:?}"
-                            ))?;
-                    replacements.insert(var, replacement.to_string());
                 }
 
-                let replaced = theorem
-                    .symbols
-                    .iter()
-                    .map(|s| replacements.get(s).unwrap_or(s).as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
-                stack.push(format!("{} {replaced}", theorem.type_class));
-                continue;
+                if stack != vec![target] {
+                    dbg!(&stack);
+                    return Err(Error::MismatchedStack(p.name));
+                }
             }
 
-            anyhow::bail!("Unrecognized symbol: {sym}");
+            _ => {
+                dbg!(stmt);
+            }
         }
+    }
+    Ok(())
+}
 
-        Ok(stack)
+#[derive(Debug)]
+enum Operation {
+    PushExact(String),
+
+    Unify {
+        vars: Vec<String>,
+        type_code: String,
+        symbols: Vec<String>,
+        hypotheses: Vec<String>,
+    },
+}
+
+#[derive(Debug)]
+struct Hypothesis {
+    label: String,
+    type_code: String,
+    symbols: Vec<String>,
+    vars: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::parse;
+
+    #[test]
+    fn empty_file() {
+        assert_eq!(verify(vec![]), Ok(()));
+    }
+
+    #[test]
+    fn empty_proof() {
+        assert_eq!(
+            verify(parse("the1 $p t $= $.").unwrap()),
+            Err(Error::MismatchedStack("the1".to_string()))
+        );
+    }
+
+    #[test]
+    fn minimal_proof() {
+        let file = "
+            $c term $.
+            $v t $.
+            tt $f term t $.
+            
+            the1 $p term t $= tt $.
+        ";
+
+        assert_eq!(verify(parse(file).unwrap()), Ok(()));
+    }
+
+    #[test]
+    fn undefined_step() {
+        let file = "
+            $c term $.
+            $v t $.
+            
+            the1 $p term t $= missing $.
+        ";
+
+        assert_eq!(
+            verify(parse(file).unwrap()),
+            Err(Error::UnrecognizedLabel("missing".to_string()))
+        );
+    }
+
+    #[test]
+    fn type_setting_axiom() {
+        let file = "
+            $c 0 term $.
+            tze $a term 0 $.
+            
+            the1 $p term 0 $= tze $.
+        ";
+
+        assert_eq!(verify(parse(file).unwrap()), Ok(()));
+    }
+
+    #[test]
+    fn axiom_in_block() {
+        let file = "
+            $c 0 term $.
+            ${
+                tze $a term 0 $.
+            $}
+            
+            the1 $p term 0 $= tze $.
+        ";
+
+        assert_eq!(verify(parse(file).unwrap()), Ok(()));
+    }
+
+    #[test]
+    fn variable_in_axiom() {
+        let file = "
+            $c num happy 0 $.
+            $v n $.
+
+            num_n $f num n $.
+
+            num_zero $a num 0 $.
+            num_happy $a happy n $.
+            
+            the1 $p happy 0 $= num_zero num_happy $.
+        ";
+
+        assert_eq!(verify(parse(file).unwrap()), Ok(()));
+    }
+
+    #[test]
+    fn only_replaces_once() {
+        let file = "
+            $c num 0 = true $.
+            $v n $.
+
+            num_n $f num n $.
+
+            num_zero $a num 0 $.
+            num_eq_self $a true n = n $.
+            
+            the1 $p true 0 = 0 $= num_zero num_eq_self $.
+        ";
+
+        assert_eq!(verify(parse(file).unwrap()), Ok(()));
+    }
+
+    #[test]
+    fn num_happy_as_nested() {
+        let file = "
+            $c num happy 0 1 > $.
+            $v n $.
+
+            num_n $f num n $.
+            num_one $a num 1 $.
+
+            one_gt_zero $a true 1 > 0 $.
+
+            ${
+                is_gt_ze $e true n > 0 $.
+                num_happy $a happy n $.
+            $}
+            
+            the1 $p happy 1 $= num_one one_gt_zero num_happy $.
+        ";
+
+        assert_eq!(verify(parse(file).unwrap()), Ok(()));
+    }
+
+    #[test]
+    fn incorrect_statement_in_hypothesis() {
+        let file = "
+            $c num happy 0 1 > $.
+            $v n $.
+
+            num_n $f num n $.
+            num_zero $a num 0 $.
+
+            one_gt_zero $a true 1 > 0 $.
+
+            ${
+                is_gt_ze $e true n > 0 $.
+                num_happy $a happy n $.
+            $}
+            
+            the1 $p happy 0 $= num_zero one_gt_zero num_happy $.
+        ";
+
+        assert_eq!(
+            verify(parse(file).unwrap()),
+            Err(Error::MismatchedStep {
+                expected: String::from("true 0 > 0"),
+                got: String::from("true 1 > 0"),
+            })
+        );
+    }
+
+    #[test]
+    fn happy_with_two_vars() {
+        let file = "
+            $c num happy 0 1 > $.
+            $v n m $.
+
+            num_n $f num n $.
+            num_m $f num m $.
+            num_zero $a num 0 $.
+            num_one  $a num 1 $.
+
+            zero_lt_one $a true 0 < 1 $.
+
+            ${
+                is_gt $e true m < n $.
+                num_happy $a happy n $.
+            $}
+            
+            the1 $p happy 1 $= num_zero num_one zero_lt_one num_happy $.
+        ";
+
+        assert_eq!(verify(parse(file).unwrap()), Ok(()));
     }
 }
