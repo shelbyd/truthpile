@@ -14,34 +14,34 @@ pub enum Stmt {
     VarDecl(Vec<String>),
     Disjoint(Vec<String>),
 
-    Func(Func),
-    Expr(Expr),
-    Assertion(Expr),
+    FloatingHypothesis(FloatingHypothesis),
+    LogicalHypothesis(Expr),
+    Axiom(Expr),
     Proof(Proof),
 
     Block(Vec<Stmt>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Func {
-    name: String,
-    type_code: String,
-    var: String,
+pub struct FloatingHypothesis {
+    pub name: String,
+    pub type_code: String,
+    pub var: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Expr {
-    name: String,
-    type_code: String,
-    symbols: Vec<String>,
+    pub name: String,
+    pub type_code: String,
+    pub symbols: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Proof {
-    name: String,
-    type_code: String,
-    symbols: Vec<String>,
-    labels: Vec<String>,
+    pub name: String,
+    pub type_code: String,
+    pub symbols: Vec<String>,
+    pub proof: Vec<String>,
 }
 
 pub fn parse(s: &str) -> anyhow::Result<Vec<Stmt>> {
@@ -127,7 +127,7 @@ fn func(t: Toks) -> IResult<Toks, Stmt> {
 
     Ok((
         t,
-        Stmt::Func(Func {
+        Stmt::FloatingHypothesis(FloatingHypothesis {
             name: name.to_string(),
             type_code: type_code.to_string(),
             var: var.to_string(),
@@ -144,7 +144,7 @@ fn expr(t: Toks) -> IResult<Toks, Stmt> {
 
     Ok((
         t,
-        Stmt::Expr(Expr {
+        Stmt::LogicalHypothesis(Expr {
             name: name.to_string(),
             type_code: type_code.to_string(),
             symbols: owned_vec(symbols),
@@ -161,7 +161,7 @@ fn assertion(t: Toks) -> IResult<Toks, Stmt> {
 
     Ok((
         t,
-        Stmt::Assertion(Expr {
+        Stmt::Axiom(Expr {
             name: name.to_string(),
             type_code: type_code.to_string(),
             symbols: owned_vec(symbols),
@@ -184,7 +184,7 @@ fn proof(t: Toks) -> IResult<Toks, Stmt> {
             name: name.to_string(),
             type_code: type_code.to_string(),
             symbols: owned_vec(symbols),
-            labels: owned_vec(labels),
+            proof: owned_vec(labels),
         }),
     ))
 }

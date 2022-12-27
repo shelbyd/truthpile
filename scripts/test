@@ -10,8 +10,15 @@ if [ ! -d target/metamath-test ]; then
 	popd
 fi
 
+if [ ! -f target/tapview ]; then
+	pushd target/
+	wget -O- https://gitlab.com/esr/tapview/-/raw/master/tapview?inline=false > tapview
+	chmod +x tapview
+	popd
+fi
+
 cargo test
 cargo build
 
 pushd target/metamath-test
-./run-testsuite '../debug/truthpile verify'
+./run-testsuite '../debug/truthpile verify' | ../tapview
