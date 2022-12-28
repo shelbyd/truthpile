@@ -1,6 +1,7 @@
 use structopt::*;
 
 mod ast;
+mod proof;
 mod verify;
 
 #[derive(Debug, StructOpt)]

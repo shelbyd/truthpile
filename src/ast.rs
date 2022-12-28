@@ -8,6 +8,8 @@ use nom::{
     *,
 };
 
+use crate::proof::*;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stmt {
     ConstantDecl(Vec<String>),
@@ -17,7 +19,7 @@ pub enum Stmt {
     VarTypeDecl(FloatingHypothesis),
     LogicalHypothesis(Expr),
     Axiom(Expr),
-    Proof(Proof),
+    Theorem(Theorem),
 
     Block(Vec<Stmt>),
 }
@@ -37,11 +39,11 @@ pub struct Expr {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Proof {
+pub struct Theorem {
     pub name: String,
     pub type_code: String,
     pub symbols: Vec<String>,
-    pub proof: Vec<String>,
+    pub proof: Proof,
 }
 
 pub fn parse(s: &str) -> anyhow::Result<Vec<Stmt>> {
@@ -60,6 +62,12 @@ pub fn parse(s: &str) -> anyhow::Result<Vec<Stmt>> {
     let (_, stmts) =
         limit_err_len(10, root)(&tokens).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     Ok(stmts)
+}
+
+#[allow(unused)]
+fn beginning(t: Toks) -> Toks {
+    let end = core::cmp::min(t.len(), 40);
+    &t[..end]
 }
 
 type Toks<'t> = &'t [Token<'t>];
@@ -88,6 +96,7 @@ fn stmts(t: Toks) -> IResult<Toks, Vec<Stmt>> {
         expr,
         assertion,
         proof,
+        compressed_proof,
         disjoint,
     )))(t)
 }
@@ -175,16 +184,39 @@ fn proof(t: Toks) -> IResult<Toks, Stmt> {
     let (t, type_code) = math_sym(t)?;
     let (t, symbols) = many0(math_sym)(t)?;
     let (t, _) = tok(Token::Eq)(t)?;
-    let (t, labels) = many0(math_sym)(t)?;
+    let (t, labels) = many0(label)(t)?;
     let (t, _) = tok(Token::Term)(t)?;
 
     Ok((
         t,
-        Stmt::Proof(Proof {
+        Stmt::Theorem(Theorem {
             name: name.to_string(),
             type_code: type_code.to_string(),
             symbols: owned_vec(symbols),
-            proof: owned_vec(labels),
+            proof: Proof::Plain(owned_vec(labels)),
+        }),
+    ))
+}
+
+fn compressed_proof(t: Toks) -> IResult<Toks, Stmt> {
+    let (t, name) = label(t)?;
+    let (t, _) = tok(Token::P)(t)?;
+    let (t, type_code) = math_sym(t)?;
+    let (t, symbols) = many0(math_sym)(t)?;
+    let (t, _) = tok(Token::Eq)(t)?;
+    let (t, _) = tok(Token::MathSymbol("("))(t)?;
+    let (t, labels) = many0(label)(t)?;
+    let (t, _) = tok(Token::MathSymbol(")"))(t)?;
+    let (t, letters) = many0(upper)(t)?;
+    let (t, _) = tok(Token::Term)(t)?;
+
+    Ok((
+        t,
+        Stmt::Theorem(Theorem {
+            name: name.to_string(),
+            type_code: type_code.to_string(),
+            symbols: owned_vec(symbols),
+            proof: Proof::Compressed(owned_vec(labels), letters.join("")),
         }),
     ))
 }
@@ -212,8 +244,9 @@ fn tok(expected: Token) -> impl FnMut(Toks) -> IResult<Toks, ()> + '_ {
 
 fn math_sym<'t>(t: Toks<'t>) -> IResult<Toks<'t>, &'t str> {
     match t.split_first() {
-        Some((Token::MathSymbol(s), rest)) => Ok((rest, s)),
+        Some((Token::Upper(s), rest)) => Ok((rest, s)),
         Some((Token::Label(s), rest)) => Ok((rest, s)),
+        Some((Token::MathSymbol(s), rest)) => Ok((rest, s)),
 
         None => Err(Err::Error(Error::new(t, ErrorKind::Eof))),
         Some((_unexpected, _)) => Err(Err::Error(Error::new(t, ErrorKind::Tag))),
@@ -222,7 +255,17 @@ fn math_sym<'t>(t: Toks<'t>) -> IResult<Toks<'t>, &'t str> {
 
 fn label<'t>(t: Toks<'t>) -> IResult<Toks<'t>, &'t str> {
     match t.split_first() {
+        Some((Token::Upper(s), rest)) => Ok((rest, s)),
         Some((Token::Label(s), rest)) => Ok((rest, s)),
+
+        None => Err(Err::Error(Error::new(t, ErrorKind::Eof))),
+        Some((_unexpected, _)) => Err(Err::Error(Error::new(t, ErrorKind::Tag))),
+    }
+}
+
+fn upper<'t>(t: Toks<'t>) -> IResult<Toks<'t>, &'t str> {
+    match t.split_first() {
+        Some((Token::Upper(s), rest)) => Ok((rest, s)),
 
         None => Err(Err::Error(Error::new(t, ErrorKind::Eof))),
         Some((_unexpected, _)) => Err(Err::Error(Error::new(t, ErrorKind::Tag))),
@@ -295,6 +338,9 @@ enum Token<'i> {
 
     #[token("$.")]
     Term,
+
+    #[regex(r"[A-Z]+", priority = 3)]
+    Upper(&'i str),
 
     #[regex(r"[a-zA-Z0-9-_\.]+", priority = 2)]
     Label(&'i str),

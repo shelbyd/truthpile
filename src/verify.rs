@@ -1,7 +1,7 @@
-use itertools::*;
+use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::Stmt;
+use crate::{ast::Stmt, proof::Step};
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -19,12 +19,12 @@ pub enum Error {
 }
 
 pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
-    // let mut consts = Vec::new();
     let mut vars = HashSet::new();
     let mut all_hypotheses = Vec::<Hypothesis>::new();
 
     let mut ops = HashMap::new();
 
+    // TODO(shelbyd): Don't flatten.
     let flattened = stmts.into_iter().flat_map(|s| match s {
         Stmt::Block(b) => b,
         _ => vec![s],
@@ -75,13 +75,26 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
                 });
             }
 
-            Stmt::Proof(p) => {
-                let mut stack = Vec::<String>::new();
+            Stmt::Theorem(p) => {
+                let mut stack = Vec::new();
+                let mut heap = Vec::<String>::new();
 
-                for step in p.proof {
-                    ops.get(&step)
-                        .ok_or(Error::UnrecognizedLabel(step))?
-                        .apply_to(&mut stack, &all_hypotheses)?;
+                // TODO(shelbyd): Provide this correctly / Unit tests for this.
+                let mandatory_hypotheses = all_hypotheses
+                    .iter()
+                    .map(|h| h.label.as_str())
+                    .collect::<Vec<_>>();
+                for step in p.proof.plain(&mandatory_hypotheses) {
+                    match step {
+                        Step::Label(step) => {
+                            ops.get(step)
+                                .ok_or(Error::UnrecognizedLabel(step.to_string()))?
+                                .apply_to(&mut stack, &all_hypotheses)?;
+                        }
+                        Step::ToHeap => {
+                            heap.push(stack.last().unwrap().clone());
+                        }
+                    }
                 }
 
                 let target = statement(&p.type_code, p.symbols);
@@ -402,5 +415,58 @@ mod tests {
         ";
 
         assert_eq!(verify(parse(file).unwrap()), Ok(()));
+    }
+
+    #[test]
+    #[ignore]
+    fn does_not_require_from_other_frames() {
+        let file = "
+            $c num happy sad 0 1 > = $.
+            $v n $.
+
+            num_n $f num n $.
+            num_one $a num 1 $.
+
+            one_gt_zero $a true 1 > 0 $.
+
+            ${
+                is_gt_ze $e true n = 0 $.
+                num_sad $a sad n $.
+            $}
+
+            ${
+                is_gt_ze $e true n > 0 $.
+                num_happy $a happy n $.
+            $}
+            
+            the1 $p happy 1 $= num_one one_gt_zero num_happy $.
+        ";
+
+        assert_eq!(verify(parse(file).unwrap()), Ok(()));
+    }
+
+    mod compressed {
+        use super::*;
+
+        #[test]
+        fn single_step() {
+            let file = "
+                $c term $.
+                $v t $.
+                tt $f term t $.
+            
+                the1 $p term t $= ( tt ) A $.
+            ";
+
+            assert_eq!(verify(parse(file).unwrap()), Ok(()));
+        }
+
+        #[test]
+        #[ignore]
+        fn proof_by_contradiction() {
+            let file = include_str!("./proof_by_contradiction.mm");
+
+            assert_eq!(verify(parse(file).unwrap()), Ok(()));
+        }
     }
 }
