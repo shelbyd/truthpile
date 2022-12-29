@@ -29,10 +29,9 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
     let frame = compile(stmts)?;
 
     for t in &frame.theorems {
-        let mut stack = Vec::new();
-        let mut heap = Vec::<String>::new();
+        let mut stack = Vec::<Sequence>::new();
+        let mut heap = Vec::<Sequence>::new();
 
-        // TODO(shelbyd): Provide this correctly / Unit tests for this.
         let mandatory_hypotheses = t.hypotheses.iter().map(|h| h.as_str()).collect::<Vec<_>>();
         for step in t.proof.plain(&mandatory_hypotheses) {
             match step {
@@ -44,13 +43,16 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
                 Step::ToHeap => {
                     heap.push(stack.last().unwrap().clone());
                 }
+                Step::FromHeap(i) => {
+                    stack.push(heap[i].clone());
+                }
             }
         }
 
-        let target = statement(
-            &t.type_code,
-            &t.symbols.iter().map(|s| s.to_string()).collect(),
-        );
+        let target = Sequence {
+            type_code: t.type_code.clone(),
+            symbols: t.symbols.clone(),
+        };
         if stack != vec![target] {
             dbg!(&stack);
             return Err(Error::MismatchedStack(t.name.to_string()));
@@ -209,7 +211,7 @@ struct Unify {
 impl Unify {
     fn apply_to(
         &self,
-        stack: &mut Vec<String>,
+        stack: &mut Vec<Sequence>,
         all_hypotheses: &Vec<Hypothesis>,
     ) -> Result<(), Error> {
         let hypotheses_proofs = self
@@ -231,8 +233,7 @@ impl Unify {
             let top = stack
                 .pop()
                 .ok_or_else(|| Error::ExhaustedStack(var.to_string()))?;
-            let suff = top.split_once(" ").unwrap().1;
-            replacements.insert(var.clone(), suff.to_string());
+            replacements.insert(var.clone(), top.symbols);
         }
 
         for (hypothesis, provided) in hypotheses_proofs {
@@ -241,23 +242,23 @@ impl Unify {
                 .find(|h| h.label == *hypothesis)
                 .unwrap();
 
-            let expected = statement(
-                &hypothesis.type_code,
-                &replace(&hypothesis.symbols, &replacements),
-            );
+            let expected = Sequence {
+                type_code: hypothesis.type_code.clone(),
+                symbols: replace(&hypothesis.symbols, &replacements),
+            };
 
             if expected != provided {
                 return Err(Error::MismatchedStep {
-                    expected,
-                    got: provided,
+                    expected: expected.to_string(),
+                    got: provided.to_string(),
                 });
             }
         }
 
-        stack.push(statement(
-            &self.type_code,
-            &replace(&self.symbols, &replacements),
-        ));
+        stack.push(Sequence {
+            type_code: self.type_code.clone(),
+            symbols: replace(&self.symbols, &replacements),
+        });
         Ok(())
     }
 }
@@ -278,8 +279,6 @@ struct Theorem {
     proof: Proof,
     hypotheses: Vec<Label>,
 }
-
-// TODO(shelbyd): Sequence of Symbols as type instead of String.
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 struct Symbol(Rc<String>);
@@ -315,19 +314,40 @@ impl From<String> for Label {
     }
 }
 
-fn replace(syms: &[Symbol], replacements: &HashMap<Symbol, String>) -> Vec<String> {
+#[derive(PartialEq, Eq, Hash, Clone)]
+struct Sequence {
+    type_code: Symbol,
+    symbols: Vec<Symbol>,
+}
+
+impl Sequence {
+    fn to_string(&self) -> String {
+        let mut result = self.type_code.to_string();
+
+        for sym in &self.symbols {
+            result += " ";
+            result += sym;
+        }
+
+        result
+    }
+}
+
+impl std::fmt::Debug for Sequence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_string())
+    }
+}
+
+fn replace(syms: &[Symbol], replacements: &HashMap<Symbol, Vec<Symbol>>) -> Vec<Symbol> {
     syms.iter()
-        .map(|s| {
+        .flat_map(|s| {
             replacements
                 .get(s)
                 .cloned()
-                .unwrap_or_else(|| s.to_string())
+                .unwrap_or_else(|| vec![s.clone()])
         })
         .collect::<Vec<_>>()
-}
-
-fn statement(type_code: &Symbol, seq: &Vec<String>) -> String {
-    format!("{} {}", **type_code, seq.join(" "))
 }
 
 #[derive(Debug, PartialEq, Eq, Default, Clone)]
@@ -384,8 +404,15 @@ mod tests {
 
     #[test]
     fn empty_proof() {
+        let file = "
+            $c term $.
+            $v t $. 
+            tt $f term t $. 
+            the1 $p term t $= $.
+        ";
+
         assert_eq!(
-            verify(parse("$v t $. the1 $p t $= $.").unwrap()),
+            verify(parse(file).unwrap()),
             Err(Error::MismatchedStack("the1".to_string()))
         );
     }
@@ -554,6 +581,23 @@ mod tests {
         assert_eq!(verify(parse(file).unwrap()), Ok(()));
     }
 
+    #[test]
+    fn allows_empty_sequence() {
+        let file = "
+            $c wff M $.
+            $v x $.
+
+            wx $f wff x $.
+
+            we $a wff $. 
+            wM $a wff x M $.
+
+            the1 $p wff M $= we wM $.
+        ";
+
+        assert_eq!(verify(parse(file).unwrap()), Ok(()));
+    }
+
     mod compressed {
         use super::*;
 
@@ -589,7 +633,6 @@ mod tests {
         }
 
         #[test]
-        // #[ignore]
         fn demo0_compressed() {
             let file = include_str!("./db/demo0_compressed.mm");
 

@@ -8,6 +8,7 @@ pub enum Proof {
 pub enum Step<'s> {
     Label(&'s str),
     ToHeap,
+    FromHeap(usize),
 }
 
 impl Proof {
@@ -34,7 +35,12 @@ impl Proof {
             }
 
             let index = c as usize - 'A' as usize;
-            Step::Label(items[index])
+
+            if index < items.len() {
+                Step::Label(items[index])
+            } else {
+                Step::FromHeap(index - items.len())
+            }
         }))
     }
 }
@@ -88,11 +94,21 @@ mod tests {
         }
 
         #[test]
-        fn push_to_stack() {
+        fn to_heap() {
             let proof = compressed(["foo", "bar"], "AZ");
             let mut iter = proof.plain(&[]);
             assert_eq!(iter.next(), Some(Step::Label("foo")));
             assert_eq!(iter.next(), Some(Step::ToHeap));
+            assert_eq!(iter.next(), None);
+        }
+
+        #[test]
+        fn from_heap() {
+            let proof = compressed(["foo", "bar"], "AZC");
+            let mut iter = proof.plain(&[]);
+            assert_eq!(iter.next(), Some(Step::Label("foo")));
+            assert_eq!(iter.next(), Some(Step::ToHeap));
+            assert_eq!(iter.next(), Some(Step::FromHeap(0)));
             assert_eq!(iter.next(), None);
         }
     }
