@@ -1,7 +1,7 @@
 use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
 
-use crate::{ast::Stmt, proof::Step};
+use crate::{ast::*, proof::*};
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -19,10 +19,45 @@ pub enum Error {
 }
 
 pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
-    let mut vars = HashSet::new();
-    let mut all_hypotheses = Vec::<Hypothesis>::new();
+    let frame = compile(stmts)?;
 
-    let mut ops = HashMap::new();
+    for t in frame.theorems {
+        let mut stack = Vec::new();
+        let mut heap = Vec::<String>::new();
+
+        // TODO(shelbyd): Provide this correctly / Unit tests for this.
+        let mandatory_hypotheses = frame
+            .all_hypotheses
+            .iter()
+            .map(|h| h.label.as_str())
+            .collect::<Vec<_>>();
+        for step in t.proof.plain(&mandatory_hypotheses) {
+            match step {
+                Step::Label(step) => {
+                    frame
+                        .ops
+                        .get(step)
+                        .ok_or(Error::UnrecognizedLabel(step.to_string()))?
+                        .apply_to(&mut stack, &frame.all_hypotheses)?;
+                }
+                Step::ToHeap => {
+                    heap.push(stack.last().unwrap().clone());
+                }
+            }
+        }
+
+        let target = statement(&t.type_code, t.symbols);
+        if stack != vec![target] {
+            dbg!(&stack);
+            return Err(Error::MismatchedStack(t.name));
+        }
+    }
+
+    Ok(())
+}
+
+fn compile(stmts: Vec<Stmt>) -> Result<Frame, Error> {
+    let mut result = Frame::default();
 
     // TODO(shelbyd): Don't flatten.
     let flattened = stmts.into_iter().flat_map(|s| match s {
@@ -32,11 +67,11 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
     for stmt in flattened {
         match stmt {
             Stmt::ConstantDecl(_) => {}
-            Stmt::VarDecl(v) => vars.extend(v),
+            Stmt::VarDecl(v) => result.vars.extend(v),
 
             Stmt::VarTypeDecl(f) => {
                 // TODO(shelbyd): Check var is a var.
-                ops.insert(
+                result.ops.insert(
                     f.name,
                     Unify {
                         vars: OrderedVars::default(),
@@ -47,67 +82,54 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
                 );
             }
             Stmt::Axiom(a) => {
-                let direct_vars = OrderedVars::extract_with(&a.symbols, &vars);
-                let hypo_vars: OrderedVars = all_hypotheses
+                let direct_vars = OrderedVars::extract_with(&a.symbols, &result.vars);
+                let hypo_vars: OrderedVars = result
+                    .all_hypotheses
                     .iter()
                     .map(|h| &h.vars)
                     .fold(OrderedVars::default(), |acc, v| acc + v);
 
                 let axiom_vars = hypo_vars + direct_vars;
 
-                ops.insert(
+                result.ops.insert(
                     a.name,
                     Unify {
                         vars: axiom_vars,
                         type_code: a.type_code,
                         symbols: a.symbols,
-                        hypotheses: all_hypotheses.iter().map(|h| h.label.clone()).collect(),
+                        hypotheses: result
+                            .all_hypotheses
+                            .iter()
+                            .map(|h| h.label.clone())
+                            .collect(),
                     },
                 );
             }
 
             Stmt::LogicalHypothesis(h) => {
-                all_hypotheses.push(Hypothesis {
+                result.all_hypotheses.push(Hypothesis {
                     label: h.name,
                     type_code: h.type_code,
-                    vars: OrderedVars::extract_with(&h.symbols, &vars),
+                    vars: OrderedVars::extract_with(&h.symbols, &result.vars),
                     symbols: h.symbols,
                 });
             }
 
-            Stmt::Theorem(p) => {
-                let mut stack = Vec::new();
-                let mut heap = Vec::<String>::new();
-
-                // TODO(shelbyd): Provide this correctly / Unit tests for this.
-                let mandatory_hypotheses = all_hypotheses
-                    .iter()
-                    .map(|h| h.label.as_str())
-                    .collect::<Vec<_>>();
-                for step in p.proof.plain(&mandatory_hypotheses) {
-                    match step {
-                        Step::Label(step) => {
-                            ops.get(step)
-                                .ok_or(Error::UnrecognizedLabel(step.to_string()))?
-                                .apply_to(&mut stack, &all_hypotheses)?;
-                        }
-                        Step::ToHeap => {
-                            heap.push(stack.last().unwrap().clone());
-                        }
-                    }
-                }
-
-                let target = statement(&p.type_code, p.symbols);
-                if stack != vec![target] {
-                    dbg!(&stack);
-                    return Err(Error::MismatchedStack(p.name));
-                }
-            }
+            Stmt::Theorem(p) => result.theorems.push(p),
 
             _ => todo!("{stmt:?}"),
         }
     }
-    Ok(())
+
+    Ok(result)
+}
+
+#[derive(Default)]
+struct Frame {
+    vars: HashSet<String>,
+    all_hypotheses: Vec<Hypothesis>,
+    theorems: Vec<Theorem>,
+    ops: HashMap<String, Unify>,
 }
 
 #[derive(Debug, Clone)]
