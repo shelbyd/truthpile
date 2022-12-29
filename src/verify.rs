@@ -30,6 +30,9 @@ pub enum Error {
 
     #[error("specified variable {0:?} must be disjoint to itself")]
     SelfDisjoint(String),
+
+    #[error("no type defined for variable: {0}")]
+    NoVariableType(String),
 }
 
 pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
@@ -43,9 +46,16 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
         for step in t.proof.plain(&mandatory_hypotheses) {
             match step {
                 Step::Label(step) => {
-                    frame
-                        .get_op(step)?
-                        .apply_to(&mut stack, &frame.all_hypotheses)?;
+                    if let Some(unify) = frame.get_op(step) {
+                        unify.apply_to(&mut stack, &frame.all_hypotheses)?;
+                    } else if let Some(h) = frame.get_hypothesis(step) {
+                        stack.push(Sequence {
+                            type_code: h.type_code.clone(),
+                            symbols: h.symbols.clone(),
+                        });
+                    } else {
+                        return Err(Error::UnrecognizedLabel(step.to_string()));
+                    }
                 }
                 Step::ToHeap => {
                     heap.push(stack.last().unwrap().clone());
@@ -132,22 +142,35 @@ fn compile_into(
             }
 
             Stmt::LogicalHypothesis(h) => {
-                let label = Label::from(h.name);
-                scope_stack.current_mut().hypotheses.push(label.clone());
-
-                frame.all_hypotheses.push(Hypothesis {
-                    label,
+                let hypothesis = Hypothesis {
+                    label: Label::from(h.name),
                     type_code: frame.resolve_symbol(h.type_code)?,
                     vars: OrderedVars::extract_with(&h.symbols, &frame.vars),
                     symbols: frame.resolve_symbols(h.symbols)?,
-                });
+                };
+
+                scope_stack
+                    .current_mut()
+                    .hypotheses
+                    .push(hypothesis.label.clone());
+
+                frame.all_hypotheses.push(hypothesis);
             }
 
             Stmt::Theorem(t) => {
                 let vars = OrderedVars::extract_with(&t.symbols, &frame.vars);
-                let var_hypotheses = vars.iter().map(|v| frame.var_hypotheses.get(v).unwrap());
+                let var_hypotheses = vars
+                    .iter()
+                    .map(|v| {
+                        frame
+                            .var_hypotheses
+                            .get(v)
+                            .ok_or_else(|| Error::NoVariableType(v.to_string()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
 
                 let hypotheses = var_hypotheses
+                    .into_iter()
                     .cloned()
                     .chain(scope_stack.hypotheses())
                     .collect();
@@ -261,10 +284,12 @@ impl Frame {
             .ok_or_else(|| Error::UnrecognizedSymbol(as_symbol.to_string()))
     }
 
-    fn get_op(&self, step: &str) -> Result<&Unify, Error> {
-        self.ops
-            .get(&Label::from(step.to_string()))
-            .ok_or(Error::UnrecognizedLabel(step.to_string()))
+    fn get_op(&self, label: &str) -> Option<&Unify> {
+        self.ops.get(&Label::from(label.to_string()))
+    }
+
+    fn get_hypothesis(&self, label: &str) -> Option<&Hypothesis> {
+        self.all_hypotheses.iter().find(|h| *h.label == label)
     }
 }
 
@@ -341,9 +366,11 @@ impl Unify {
 #[derive(Debug, PartialEq, Eq)]
 struct Hypothesis {
     label: Label,
+    vars: OrderedVars,
+
+    // TODO(shelbyd): Should be Sequence?
     type_code: Symbol,
     symbols: Vec<Symbol>,
-    vars: OrderedVars,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -674,6 +701,26 @@ mod tests {
             wM $a wff x M $.
 
             the1 $p wff M $= we wM $.
+        ";
+
+        assert_eq!(verify(parse(file).unwrap()), Ok(()));
+    }
+
+    #[test]
+    // #[ignore]
+    fn theroem_using_hypothesis() {
+        let file = "
+            $c |- |= term $.
+            $v A R $.
+
+            ta $f term A $.
+            tr $f term R $.
+
+            ${
+              idi.1 $e |- R |= A $.
+              idi $p |- R |= A $=
+                (  ) C $.
+            $}
         ";
 
         assert_eq!(verify(parse(file).unwrap()), Ok(()));
