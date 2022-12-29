@@ -59,19 +59,30 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
 fn compile(stmts: Vec<Stmt>) -> Result<Frame, Error> {
     let mut result = Frame::default();
 
-    // TODO(shelbyd): Don't flatten.
-    let flattened = stmts.into_iter().flat_map(|s| match s {
-        Stmt::Block(b) => b,
-        _ => vec![s],
-    });
-    for stmt in flattened {
+    compile_into(stmts, &mut result, &mut Vec::new())?;
+
+    Ok(result)
+}
+
+fn compile_into(
+    stmts: Vec<Stmt>,
+    frame: &mut Frame,
+    hypotheses_stack: &mut Vec<Vec<String>>,
+) -> Result<(), Error> {
+    hypotheses_stack.push(Vec::new());
+
+    for stmt in stmts {
         match stmt {
             Stmt::ConstantDecl(_) => {}
-            Stmt::VarDecl(v) => result.vars.extend(v),
+            Stmt::VarDecl(v) => frame.vars.extend(v),
+
+            Stmt::Block(b) => {
+                compile_into(b, frame, hypotheses_stack)?;
+            }
 
             Stmt::VarTypeDecl(f) => {
                 // TODO(shelbyd): Check var is a var.
-                result.ops.insert(
+                frame.ops.insert(
                     f.name,
                     Unify {
                         vars: OrderedVars::default(),
@@ -82,8 +93,8 @@ fn compile(stmts: Vec<Stmt>) -> Result<Frame, Error> {
                 );
             }
             Stmt::Axiom(a) => {
-                let direct_vars = OrderedVars::extract_with(&a.symbols, &result.vars);
-                let hypo_vars: OrderedVars = result
+                let direct_vars = OrderedVars::extract_with(&a.symbols, &frame.vars);
+                let hypo_vars: OrderedVars = frame
                     .all_hypotheses
                     .iter()
                     .map(|h| &h.vars)
@@ -91,40 +102,44 @@ fn compile(stmts: Vec<Stmt>) -> Result<Frame, Error> {
 
                 let axiom_vars = hypo_vars + direct_vars;
 
-                result.ops.insert(
+                frame.ops.insert(
                     a.name,
                     Unify {
                         vars: axiom_vars,
                         type_code: a.type_code,
                         symbols: a.symbols,
-                        hypotheses: result
-                            .all_hypotheses
+                        hypotheses: hypotheses_stack
                             .iter()
-                            .map(|h| h.label.clone())
+                            .flat_map(|v| v)
+                            .map(|s| s.to_string())
                             .collect(),
                     },
                 );
             }
 
             Stmt::LogicalHypothesis(h) => {
-                result.all_hypotheses.push(Hypothesis {
+                hypotheses_stack.last_mut().unwrap().push(h.name.clone());
+
+                frame.all_hypotheses.push(Hypothesis {
                     label: h.name,
                     type_code: h.type_code,
-                    vars: OrderedVars::extract_with(&h.symbols, &result.vars),
+                    vars: OrderedVars::extract_with(&h.symbols, &frame.vars),
                     symbols: h.symbols,
                 });
             }
 
-            Stmt::Theorem(p) => result.theorems.push(p),
+            Stmt::Theorem(p) => frame.theorems.push(p),
 
             _ => todo!("{stmt:?}"),
         }
     }
 
-    Ok(result)
+    hypotheses_stack.pop();
+
+    Ok(())
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Frame {
     vars: HashSet<String>,
     all_hypotheses: Vec<Hypothesis>,
@@ -439,34 +454,6 @@ mod tests {
         assert_eq!(verify(parse(file).unwrap()), Ok(()));
     }
 
-    #[test]
-    #[ignore]
-    fn does_not_require_from_other_frames() {
-        let file = "
-            $c num happy sad 0 1 > = $.
-            $v n $.
-
-            num_n $f num n $.
-            num_one $a num 1 $.
-
-            one_gt_zero $a true 1 > 0 $.
-
-            ${
-                is_gt_ze $e true n = 0 $.
-                num_sad $a sad n $.
-            $}
-
-            ${
-                is_gt_ze $e true n > 0 $.
-                num_happy $a happy n $.
-            $}
-            
-            the1 $p happy 1 $= num_one one_gt_zero num_happy $.
-        ";
-
-        assert_eq!(verify(parse(file).unwrap()), Ok(()));
-    }
-
     mod compressed {
         use super::*;
 
@@ -489,6 +476,38 @@ mod tests {
             let file = include_str!("./proof_by_contradiction.mm");
 
             assert_eq!(verify(parse(file).unwrap()), Ok(()));
+        }
+    }
+
+    mod compilation {
+        use super::*;
+
+        #[test]
+        fn does_not_require_from_other_frames() {
+            let file = "
+                $c num happy sad 0 1 > = $.
+                $v n $.
+
+                num_n $f num n $.
+                num_one $a num 1 $.
+
+                one_gt_zero $a true 1 > 0 $.
+
+                ${
+                    is_eq_ze $e true n = 0 $.
+                    num_sad $a sad n $.
+                $}
+
+                ${
+                    is_gt_ze $e true n > 0 $.
+                    num_happy $a happy n $.
+                $}
+            
+                the1 $p happy 1 $= num_one one_gt_zero num_happy $.
+            ";
+
+            let frame = compile(parse(file).unwrap()).unwrap();
+            assert_eq!(frame.ops["num_happy"].hypotheses, vec!["is_gt_ze"]);
         }
     }
 }
