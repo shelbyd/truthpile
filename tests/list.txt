@@ -1,2 +1,19 @@
 empty.mm
 empty_proof.fails.mm
+minimal_proof.mm
+undefined_step.fails.mm
+type_setting_axiom.mm
+axiom_in_block.mm
+variable_in_axiom.mm
+only_replaces_once.mm
+num_happy_as_nested.mm
+incorrect_statement_in_hypothesis.fails.mm
+happy_with_two_vars.mm
+allows_empty_sequence.mm
+theorem_using_hypothesis.mm
+compressed_single_step.mm
+compressed_separate_hypotheses.mm
+demo0_compressed.mm
+disjoint_x_ne_y.mm
+disjoint_providing_same_value.fails.mm
+// TODO(shelbyd): Using same variable.

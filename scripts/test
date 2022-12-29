@@ -3,7 +3,9 @@
 set -euo pipefail
 
 function bail() {
-	echo $1
+	RED='\033[0;31m'
+	CLEAR='\033[0m'
+	echo -e "${RED}Error${CLEAR}: $1"
 	exit 1
 }
 
@@ -38,11 +40,14 @@ cargo build --release
 install_metamath
 
 cat tests/list.txt | while read test_file; do
+	if [[ $test_file == "// "* ]]; then
+		continue;
+	fi
+
 	path="tests/$test_file"
 
 	if [ ! -f "$path" ]; then
-		echo "File $path does not exist"
-		exit 1
+		bail "File $path does not exist"
 	fi
 
 	if [[ $path == *.fails.* ]]; then
@@ -59,6 +64,7 @@ cat tests/list.txt | while read test_file; do
 		echo "Expecting success $path"
 
 		if ! run_metamath $path; then
+			cat /tmp/mm.log > /dev/stderr
 			bail "metamath failed when success expected"
 		fi
 
