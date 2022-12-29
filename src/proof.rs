@@ -29,18 +29,22 @@ impl Proof {
             .chain(labels.iter().map(|s| s.as_str()))
             .collect::<Vec<_>>();
 
-        Box::new(digits.chars().map(move |c| {
-            if c == 'Z' {
-                return Step::ToHeap;
+        Box::new(digits.chars().map(move |c| match c {
+            'A'..='T' => {
+                let index = c as usize - 'A' as usize;
+
+                if index < items.len() {
+                    Step::Label(items[index])
+                } else {
+                    Step::FromHeap(index - items.len())
+                }
             }
 
-            let index = c as usize - 'A' as usize;
+            'U'..='Y' => todo!(),
 
-            if index < items.len() {
-                Step::Label(items[index])
-            } else {
-                Step::FromHeap(index - items.len())
-            }
+            'Z' => Step::ToHeap,
+
+            _ => unreachable!(),
         }))
     }
 }

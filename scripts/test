@@ -2,7 +2,71 @@
 
 set -euo pipefail
 
-mkdir -p target/
+function bail() {
+	echo $1
+	exit 1
+}
+
+function install_metamath() {
+	if [ ! -f target/metamath ]; then
+		pushd target/
+
+		wget https://us.metamath.org/downloads/metamath.tar.gz
+		tar -xf metamath.tar.gz
+		rm metamath.tar.gz
+		gcc metamath/*.c -o metamath_bin
+		rm -r metamath
+		mv metamath_bin metamath
+
+		popd
+	fi
+}
+
+function run_metamath() {
+	target/metamath "read '$1'" 'verify proof *' 'exit' > /tmp/mm.log
+
+	[ `egrep -q '?Error' < /tmp/mm.log; echo $?` -eq 1 ]
+}
+
+function run_truthpile() {
+	target/release/truthpile verify $1 2> /tmp/truthpile.log
+}
+
+cargo test --release
+cargo build --release
+
+install_metamath
+
+cat tests/list.txt | while read test_file; do
+	path="tests/$test_file"
+
+	if [ ! -f "$path" ]; then
+		echo "File $path does not exist"
+		exit 1
+	fi
+
+	if [[ $path == *.fails.* ]]; then
+		echo "Expecting failure $path"
+
+		if run_metamath $path; then
+			bail "metamath passed when failure expected"
+		fi
+
+		if run_truthpile $path; then
+			bail "truthpile passed when failure expected"
+		fi
+	else
+		echo "Expecting success $path"
+
+		if ! run_metamath $path; then
+			bail "metamath failed when success expected"
+		fi
+
+		if ! run_truthpile $path; then
+			bail "truthpile failed when success expected"
+		fi
+	fi
+done
 
 if [ ! -d target/metamath-test ]; then
 	pushd target/
@@ -17,8 +81,5 @@ if [ ! -f target/tapview ]; then
 	popd
 fi
 
-cargo test --release
-cargo build --release
-
-pushd target/metamath-test
+cd target/metamath-test
 ./run-testsuite '../release/truthpile verify' | ../tapview

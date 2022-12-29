@@ -1,0 +1,2 @@
+empty.mm
+empty_proof.fails.mm
