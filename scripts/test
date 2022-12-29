@@ -17,8 +17,8 @@ if [ ! -f target/tapview ]; then
 	popd
 fi
 
-cargo test
-cargo build
+cargo test --release
+cargo build --release
 
 pushd target/metamath-test
-./run-testsuite '../debug/truthpile verify' | ../tapview
+./run-testsuite '../release/truthpile verify' | ../tapview

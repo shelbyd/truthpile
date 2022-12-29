@@ -1,6 +1,7 @@
 use itertools::Itertools;
 use std::{
     collections::{HashMap, HashSet},
+    convert::TryFrom,
     ops::Deref,
     rc::Rc,
 };
@@ -23,6 +24,12 @@ pub enum Error {
 
     #[error("mismatched step, expected \n  {expected}\ngot \n  {got}")]
     MismatchedStep { expected: String, got: String },
+
+    #[error("overlapping disjoint variables")]
+    OverlappingDisjoint,
+
+    #[error("specified variable {0:?} must be disjoint to itself")]
+    SelfDisjoint(String),
 }
 
 pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
@@ -73,18 +80,16 @@ fn compile(stmts: Vec<Stmt>) -> Result<Frame, Error> {
 fn compile_into(
     stmts: Vec<Stmt>,
     frame: &mut Frame,
-    hypotheses_stack: &mut Vec<Vec<Label>>,
+    scope_stack: &mut Vec<Scope>,
 ) -> Result<(), Error> {
-    hypotheses_stack.push(Vec::new());
+    scope_stack.push(Scope::default());
 
     for stmt in stmts {
         match stmt {
             Stmt::ConstantDecl(c) => frame.consts.extend(c.into_iter().map(Symbol::from)),
             Stmt::VarDecl(v) => frame.vars.extend(v.into_iter().map(Symbol::from)),
 
-            Stmt::Block(b) => {
-                compile_into(b, frame, hypotheses_stack)?;
-            }
+            Stmt::Block(b) => compile_into(b, frame, scope_stack)?,
 
             Stmt::VarTypeDecl(f) => {
                 // TODO(shelbyd): Check var is a var.
@@ -100,6 +105,7 @@ fn compile_into(
                         type_code: frame.resolve_symbol(f.type_code)?,
                         symbols: vec![symbol],
                         hypotheses: vec![],
+                        disjoints: HashSet::new(),
                     },
                 );
             }
@@ -119,14 +125,15 @@ fn compile_into(
                         vars: axiom_vars,
                         type_code: frame.resolve_symbol(a.type_code)?,
                         symbols: frame.resolve_symbols(a.symbols)?,
-                        hypotheses: hypotheses_stack.iter().flat_map(|v| v).cloned().collect(),
+                        hypotheses: scope_stack.hypotheses(),
+                        disjoints: scope_stack.disjoints(),
                     },
                 );
             }
 
             Stmt::LogicalHypothesis(h) => {
                 let label = Label::from(h.name);
-                hypotheses_stack.last_mut().unwrap().push(label.clone());
+                scope_stack.current_mut().hypotheses.push(label.clone());
 
                 frame.all_hypotheses.push(Hypothesis {
                     label,
@@ -141,8 +148,8 @@ fn compile_into(
                 let var_hypotheses = vars.iter().map(|v| frame.var_hypotheses.get(v).unwrap());
 
                 let hypotheses = var_hypotheses
-                    .chain(hypotheses_stack.iter().flat_map(|v| v))
                     .cloned()
+                    .chain(scope_stack.hypotheses())
                     .collect();
 
                 frame.theorems.push(Theorem {
@@ -154,13 +161,76 @@ fn compile_into(
                 });
             }
 
-            _ => todo!("{stmt:?}"),
+            Stmt::Disjoint(_syms) => {
+                scope_stack
+                    .current_mut()
+                    .disjoints
+                    .extend(Disjoint::pairwise(&frame.resolve_symbols(_syms)?));
+            }
         }
     }
 
-    hypotheses_stack.pop();
+    scope_stack.pop();
 
     Ok(())
+}
+
+#[derive(Default, Debug)]
+struct Scope {
+    hypotheses: Vec<Label>,
+    disjoints: HashSet<Disjoint>,
+}
+
+trait VecScope {
+    fn hypotheses(&self) -> Vec<Label>;
+    fn disjoints(&self) -> HashSet<Disjoint>;
+    fn current_mut(&mut self) -> &mut Scope;
+}
+
+impl VecScope for Vec<Scope> {
+    fn hypotheses(&self) -> Vec<Label> {
+        self.iter().flat_map(|s| &s.hypotheses).cloned().collect()
+    }
+
+    fn disjoints(&self) -> HashSet<Disjoint> {
+        self.iter().flat_map(|s| &s.disjoints).cloned().collect()
+    }
+
+    fn current_mut(&mut self) -> &mut Scope {
+        self.last_mut().unwrap()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Disjoint(Symbol, Symbol);
+
+impl Disjoint {
+    fn pairwise(syms: &[Symbol]) -> impl Iterator<Item = Disjoint> + '_ {
+        syms.iter().flat_map(move |outer| {
+            syms.iter()
+                .filter_map(move |inner| Disjoint::try_from((outer, inner)).ok())
+        })
+    }
+
+    fn check_replacements(&self, r: &HashMap<Symbol, Vec<Symbol>>) -> Result<(), Error> {
+        match (r.get(&self.0), r.get(&self.1)) {
+            (Some(a), Some(b)) if a == b => Err(Error::OverlappingDisjoint),
+
+            _ => Ok(()),
+        }
+    }
+}
+
+impl TryFrom<(&Symbol, &Symbol)> for Disjoint {
+    type Error = Error;
+
+    fn try_from((a, b): (&Symbol, &Symbol)) -> Result<Self, Self::Error> {
+        match a.cmp(b) {
+            std::cmp::Ordering::Less => Ok(Disjoint(a.clone(), b.clone())),
+            std::cmp::Ordering::Equal => Err(Error::SelfDisjoint(a.to_string())),
+            std::cmp::Ordering::Greater => Ok(Disjoint(b.clone(), a.clone())),
+        }
+    }
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -206,6 +276,7 @@ struct Unify {
 
     // TODO(shelbyd): Should be Vec<Rc<Hypothesis>>.
     hypotheses: Vec<Label>,
+    disjoints: HashSet<Disjoint>,
 }
 
 impl Unify {
@@ -234,6 +305,10 @@ impl Unify {
                 .pop()
                 .ok_or_else(|| Error::ExhaustedStack(var.to_string()))?;
             replacements.insert(var.clone(), top.symbols);
+        }
+
+        for disjoint in &self.disjoints {
+            disjoint.check_replacements(&replacements)?;
         }
 
         for (hypothesis, provided) in hypotheses_proofs {
@@ -280,7 +355,7 @@ struct Theorem {
     hypotheses: Vec<Label>,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+#[derive(PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
 struct Symbol(Rc<String>);
 
 impl Deref for Symbol {
@@ -294,6 +369,12 @@ impl Deref for Symbol {
 impl From<String> for Symbol {
     fn from(s: String) -> Self {
         Symbol(Rc::new(s))
+    }
+}
+
+impl std::fmt::Debug for Symbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
     }
 }
 
@@ -709,5 +790,60 @@ mod tests {
                 vec![Label::from("tt".to_string())]
             );
         }
+    }
+
+    mod disjoint {
+        use super::*;
+
+        #[test]
+        fn x_ne_y() {
+            let file = "
+                $c true num 0 1 != $.
+                $v x y $.
+
+                num_x $f num x $.
+                num_y $f num y $.
+
+                num_zero $a num 0 $.
+                num_one  $a num 1 $.
+
+                ${
+                    $d x y $.
+                    x_ne_y $a true x != y $.
+                $}
+            
+                the1 $p true 0 != 1 $= num_zero num_one x_ne_y $.
+            ";
+
+            assert_eq!(verify(parse(file).unwrap()), Ok(()));
+        }
+
+        #[test]
+        fn try_to_provide_same_value() {
+            let file = "
+                $c true num 0 1 != $.
+                $v x y $.
+
+                num_x $f num x $.
+                num_y $f num y $.
+
+                num_zero $a num 0 $.
+                num_one  $a num 1 $.
+
+                ${
+                    $d x y $.
+                    x_ne_y $a true x != y $.
+                $}
+            
+                the1 $p true 0 != 0 $= num_zero num_zero x_ne_y $.
+            ";
+
+            assert_eq!(
+                verify(parse(file).unwrap()),
+                Err(Error::OverlappingDisjoint)
+            );
+        }
+
+        // TODO(shelbyd): Using same variable.
     }
 }
