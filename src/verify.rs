@@ -33,11 +33,7 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
         let mut heap = Vec::<String>::new();
 
         // TODO(shelbyd): Provide this correctly / Unit tests for this.
-        let mandatory_hypotheses = frame
-            .all_hypotheses
-            .iter()
-            .map(|h| h.label.as_str())
-            .collect::<Vec<_>>();
+        let mandatory_hypotheses = t.hypotheses.iter().map(|h| h.as_str()).collect::<Vec<_>>();
         for step in t.proof.plain(&mandatory_hypotheses) {
             match step {
                 Step::Label(step) => {
@@ -51,10 +47,13 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
             }
         }
 
-        let target = statement(&frame.resolve_symbol(&t.type_code)?, &t.symbols);
+        let target = statement(
+            &t.type_code,
+            &t.symbols.iter().map(|s| s.to_string()).collect(),
+        );
         if stack != vec![target] {
             dbg!(&stack);
-            return Err(Error::MismatchedStack(t.name.clone()));
+            return Err(Error::MismatchedStack(t.name.to_string()));
         }
     }
 
@@ -87,12 +86,17 @@ fn compile_into(
 
             Stmt::VarTypeDecl(f) => {
                 // TODO(shelbyd): Check var is a var.
+                let symbol = frame.resolve_symbol(f.var)?;
+                let label = Label::from(f.name);
+
+                frame.var_hypotheses.insert(symbol.clone(), label.clone());
+
                 frame.ops.insert(
-                    Label::from(f.name),
+                    label,
                     Unify {
                         vars: OrderedVars::default(),
                         type_code: frame.resolve_symbol(f.type_code)?,
-                        symbols: frame.resolve_symbols(vec![f.var])?,
+                        symbols: vec![symbol],
                         hypotheses: vec![],
                     },
                 );
@@ -130,7 +134,23 @@ fn compile_into(
                 });
             }
 
-            Stmt::Theorem(p) => frame.theorems.push(p),
+            Stmt::Theorem(t) => {
+                let vars = OrderedVars::extract_with(&t.symbols, &frame.vars);
+                let var_hypotheses = vars.iter().map(|v| frame.var_hypotheses.get(v).unwrap());
+
+                let hypotheses = var_hypotheses
+                    .chain(hypotheses_stack.iter().flat_map(|v| v))
+                    .cloned()
+                    .collect();
+
+                frame.theorems.push(Theorem {
+                    name: Label::from(t.name),
+                    type_code: frame.resolve_symbol(t.type_code)?,
+                    symbols: frame.resolve_symbols(t.symbols)?,
+                    proof: t.proof,
+                    hypotheses,
+                });
+            }
 
             _ => todo!("{stmt:?}"),
         }
@@ -147,6 +167,8 @@ struct Frame {
     consts: HashSet<Symbol>,
 
     all_hypotheses: Vec<Hypothesis>,
+    var_hypotheses: HashMap<Symbol, Label>,
+
     theorems: Vec<Theorem>,
     ops: HashMap<Label, Unify>,
 }
@@ -248,6 +270,15 @@ struct Hypothesis {
     vars: OrderedVars,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct Theorem {
+    name: Label,
+    type_code: Symbol,
+    symbols: Vec<Symbol>,
+    proof: Proof,
+    hypotheses: Vec<Label>,
+}
+
 // TODO(shelbyd): Sequence of Symbols as type instead of String.
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -319,6 +350,10 @@ impl OrderedVars {
     fn rev_iter(&self) -> impl Iterator<Item = &Symbol> {
         self.vars.iter().rev()
     }
+
+    fn iter(&self) -> impl Iterator<Item = &Symbol> {
+        self.vars.iter()
+    }
 }
 
 impl<O> core::ops::Add<O> for OrderedVars
@@ -373,6 +408,8 @@ mod tests {
         let file = "
             $c term $.
             $v t $.
+
+            tt $f term t $.
             
             the1 $p term t $= missing $.
         ";
@@ -534,9 +571,27 @@ mod tests {
         }
 
         #[test]
-        #[ignore]
-        fn proof_by_contradiction() {
-            let file = include_str!("./proof_by_contradiction.mm");
+        fn does_not_provide_other_frame_hypotheses() {
+            let file = "
+                $c term $.
+                $v t $.
+                tt $f term t $.
+
+                ${
+                    should_not_be_used $e term t $.
+                    axiom $a term t $.
+                $}
+            
+                the1 $p term t $= ( tt ) A $.
+            ";
+
+            assert_eq!(verify(parse(file).unwrap()), Ok(()));
+        }
+
+        #[test]
+        // #[ignore]
+        fn demo0_compressed() {
+            let file = include_str!("./db/demo0_compressed.mm");
 
             assert_eq!(verify(parse(file).unwrap()), Ok(()));
         }
@@ -591,6 +646,24 @@ mod tests {
             assert_eq!(
                 compile(parse(file).unwrap()),
                 Err(Error::UnrecognizedSymbol("ph".to_string()))
+            );
+        }
+
+        #[test]
+        fn hypotheses_from_theorem_statement() {
+            let file = "
+                $c term $.
+                $v t $.
+
+                tt $f term t $.
+
+                the1 $p term t $= ( ) A $.
+            ";
+
+            let frame = compile(parse(file).unwrap()).unwrap();
+            assert_eq!(
+                frame.theorems[0].hypotheses,
+                vec![Label::from("tt".to_string())]
             );
         }
     }
