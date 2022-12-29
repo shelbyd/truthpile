@@ -1,5 +1,9 @@
 use itertools::Itertools;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Deref,
+    rc::Rc,
+};
 
 use crate::{ast::*, proof::*};
 
@@ -11,6 +15,9 @@ pub enum Error {
     #[error("unrecognized label: {0}")]
     UnrecognizedLabel(String),
 
+    #[error("unrecognized symbol: {0}")]
+    UnrecognizedSymbol(String),
+
     #[error("exhausted stack trying to resolve: {0}")]
     ExhaustedStack(String),
 
@@ -21,7 +28,7 @@ pub enum Error {
 pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
     let frame = compile(stmts)?;
 
-    for t in frame.theorems {
+    for t in &frame.theorems {
         let mut stack = Vec::new();
         let mut heap = Vec::<String>::new();
 
@@ -35,9 +42,7 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
             match step {
                 Step::Label(step) => {
                     frame
-                        .ops
-                        .get(step)
-                        .ok_or(Error::UnrecognizedLabel(step.to_string()))?
+                        .get_op(step)?
                         .apply_to(&mut stack, &frame.all_hypotheses)?;
                 }
                 Step::ToHeap => {
@@ -46,10 +51,10 @@ pub fn verify(stmts: Vec<Stmt>) -> Result<(), Error> {
             }
         }
 
-        let target = statement(&t.type_code, t.symbols);
+        let target = statement(&frame.resolve_symbol(&t.type_code)?, &t.symbols);
         if stack != vec![target] {
             dbg!(&stack);
-            return Err(Error::MismatchedStack(t.name));
+            return Err(Error::MismatchedStack(t.name.clone()));
         }
     }
 
@@ -67,14 +72,14 @@ fn compile(stmts: Vec<Stmt>) -> Result<Frame, Error> {
 fn compile_into(
     stmts: Vec<Stmt>,
     frame: &mut Frame,
-    hypotheses_stack: &mut Vec<Vec<String>>,
+    hypotheses_stack: &mut Vec<Vec<Label>>,
 ) -> Result<(), Error> {
     hypotheses_stack.push(Vec::new());
 
     for stmt in stmts {
         match stmt {
-            Stmt::ConstantDecl(_) => {}
-            Stmt::VarDecl(v) => frame.vars.extend(v),
+            Stmt::ConstantDecl(c) => frame.consts.extend(c.into_iter().map(Symbol::from)),
+            Stmt::VarDecl(v) => frame.vars.extend(v.into_iter().map(Symbol::from)),
 
             Stmt::Block(b) => {
                 compile_into(b, frame, hypotheses_stack)?;
@@ -83,11 +88,11 @@ fn compile_into(
             Stmt::VarTypeDecl(f) => {
                 // TODO(shelbyd): Check var is a var.
                 frame.ops.insert(
-                    f.name,
+                    Label::from(f.name),
                     Unify {
                         vars: OrderedVars::default(),
-                        type_code: f.type_code,
-                        symbols: vec![f.var],
+                        type_code: frame.resolve_symbol(f.type_code)?,
+                        symbols: frame.resolve_symbols(vec![f.var])?,
                         hypotheses: vec![],
                     },
                 );
@@ -103,28 +108,25 @@ fn compile_into(
                 let axiom_vars = hypo_vars + direct_vars;
 
                 frame.ops.insert(
-                    a.name,
+                    Label::from(a.name),
                     Unify {
                         vars: axiom_vars,
-                        type_code: a.type_code,
-                        symbols: a.symbols,
-                        hypotheses: hypotheses_stack
-                            .iter()
-                            .flat_map(|v| v)
-                            .map(|s| s.to_string())
-                            .collect(),
+                        type_code: frame.resolve_symbol(a.type_code)?,
+                        symbols: frame.resolve_symbols(a.symbols)?,
+                        hypotheses: hypotheses_stack.iter().flat_map(|v| v).cloned().collect(),
                     },
                 );
             }
 
             Stmt::LogicalHypothesis(h) => {
-                hypotheses_stack.last_mut().unwrap().push(h.name.clone());
+                let label = Label::from(h.name);
+                hypotheses_stack.last_mut().unwrap().push(label.clone());
 
                 frame.all_hypotheses.push(Hypothesis {
-                    label: h.name,
-                    type_code: h.type_code,
+                    label,
+                    type_code: frame.resolve_symbol(h.type_code)?,
                     vars: OrderedVars::extract_with(&h.symbols, &frame.vars),
-                    symbols: h.symbols,
+                    symbols: frame.resolve_symbols(h.symbols)?,
                 });
             }
 
@@ -139,20 +141,47 @@ fn compile_into(
     Ok(())
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, PartialEq, Eq)]
 struct Frame {
-    vars: HashSet<String>,
+    vars: HashSet<Symbol>,
+    consts: HashSet<Symbol>,
+
     all_hypotheses: Vec<Hypothesis>,
     theorems: Vec<Theorem>,
-    ops: HashMap<String, Unify>,
+    ops: HashMap<Label, Unify>,
 }
 
-#[derive(Debug, Clone)]
+impl Frame {
+    fn resolve_symbols(&self, symbols: Vec<String>) -> Result<Vec<Symbol>, Error> {
+        symbols
+            .into_iter()
+            .map(|s| self.resolve_symbol(s))
+            .collect()
+    }
+
+    fn resolve_symbol(&self, s: impl AsRef<str>) -> Result<Symbol, Error> {
+        let as_symbol = Symbol::from(s.as_ref().to_string());
+        None.or_else(|| self.vars.get(&as_symbol))
+            .or_else(|| self.consts.get(&as_symbol))
+            .cloned()
+            .ok_or_else(|| Error::UnrecognizedSymbol(as_symbol.to_string()))
+    }
+
+    fn get_op(&self, step: &str) -> Result<&Unify, Error> {
+        self.ops
+            .get(&Label::from(step.to_string()))
+            .ok_or(Error::UnrecognizedLabel(step.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Unify {
     vars: OrderedVars,
-    type_code: String,
-    symbols: Vec<String>,
-    hypotheses: Vec<String>,
+    type_code: Symbol,
+    symbols: Vec<Symbol>,
+
+    // TODO(shelbyd): Should be Vec<Rc<Hypothesis>>.
+    hypotheses: Vec<Label>,
 }
 
 impl Unify {
@@ -173,7 +202,7 @@ impl Unify {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut replacements = HashMap::<String, String>::new();
+        let mut replacements = HashMap::new();
 
         for var in self.vars.rev_iter() {
             // TODO(shelbyd): Check typeclass.
@@ -181,7 +210,7 @@ impl Unify {
                 .pop()
                 .ok_or_else(|| Error::ExhaustedStack(var.to_string()))?;
             let suff = top.split_once(" ").unwrap().1;
-            replacements.insert(var.to_string(), suff.to_string());
+            replacements.insert(var.clone(), suff.to_string());
         }
 
         for (hypothesis, provided) in hypotheses_proofs {
@@ -192,7 +221,7 @@ impl Unify {
 
             let expected = statement(
                 &hypothesis.type_code,
-                replace(&hypothesis.symbols, &replacements),
+                &replace(&hypothesis.symbols, &replacements),
             );
 
             if expected != provided {
@@ -205,23 +234,58 @@ impl Unify {
 
         stack.push(statement(
             &self.type_code,
-            replace(&self.symbols, &replacements),
+            &replace(&self.symbols, &replacements),
         ));
         Ok(())
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct Hypothesis {
-    label: String,
-    type_code: String,
-    symbols: Vec<String>,
+    label: Label,
+    type_code: Symbol,
+    symbols: Vec<Symbol>,
     vars: OrderedVars,
 }
 
-fn replace(syms: &[impl AsRef<str>], replacements: &HashMap<String, String>) -> Vec<String> {
+// TODO(shelbyd): Sequence of Symbols as type instead of String.
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+struct Symbol(Rc<String>);
+
+impl Deref for Symbol {
+    type Target = String;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl From<String> for Symbol {
+    fn from(s: String) -> Self {
+        Symbol(Rc::new(s))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+struct Label(Rc<String>);
+
+impl Deref for Label {
+    type Target = String;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl From<String> for Label {
+    fn from(s: String) -> Self {
+        Label(Rc::new(s))
+    }
+}
+
+fn replace(syms: &[Symbol], replacements: &HashMap<Symbol, String>) -> Vec<String> {
     syms.iter()
-        .map(|s| s.as_ref())
         .map(|s| {
             replacements
                 .get(s)
@@ -231,30 +295,29 @@ fn replace(syms: &[impl AsRef<str>], replacements: &HashMap<String, String>) -> 
         .collect::<Vec<_>>()
 }
 
-fn statement(type_code: &str, replacements: Vec<String>) -> String {
-    format!("{type_code} {}", replacements.join(" "))
+fn statement(type_code: &Symbol, seq: &Vec<String>) -> String {
+    format!("{} {}", **type_code, seq.join(" "))
 }
 
 #[derive(Debug, PartialEq, Eq, Default, Clone)]
 struct OrderedVars {
-    vars: Vec<String>,
+    vars: Vec<Symbol>,
 }
 
 impl OrderedVars {
-    fn extract_with(syms: &[impl AsRef<str>], vars: &HashSet<String>) -> Self {
+    fn extract_with(syms: &[impl AsRef<str>], vars: &HashSet<Symbol>) -> Self {
         OrderedVars {
             vars: syms
                 .iter()
                 .map(|s| s.as_ref())
-                .filter(|s| vars.contains(*s))
+                .filter_map(|s| vars.get(&Symbol::from(s.to_string())).cloned())
                 .unique() // TODO(shelbyd): Test that requires unique
-                .map(|s| s.to_string())
                 .collect(),
         }
     }
 
-    fn rev_iter(&self) -> impl Iterator<Item = &str> {
-        self.vars.iter().rev().map(|s| s.as_str())
+    fn rev_iter(&self) -> impl Iterator<Item = &Symbol> {
+        self.vars.iter().rev()
     }
 }
 
@@ -267,7 +330,7 @@ where
     fn add(mut self, rhs: O) -> Self::Output {
         for var in &rhs.borrow().vars {
             if !self.vars.contains(&var) {
-                self.vars.push(var.to_string());
+                self.vars.push(var.clone());
             }
         }
         self
@@ -287,7 +350,7 @@ mod tests {
     #[test]
     fn empty_proof() {
         assert_eq!(
-            verify(parse("the1 $p t $= $.").unwrap()),
+            verify(parse("$v t $. the1 $p t $= $.").unwrap()),
             Err(Error::MismatchedStack("the1".to_string()))
         );
     }
@@ -383,7 +446,7 @@ mod tests {
     #[test]
     fn num_happy_as_nested() {
         let file = "
-            $c num happy 0 1 > $.
+            $c true num happy 0 1 > $.
             $v n $.
 
             num_n $f num n $.
@@ -405,7 +468,7 @@ mod tests {
     #[test]
     fn incorrect_statement_in_hypothesis() {
         let file = "
-            $c num happy 0 1 > $.
+            $c true num happy 0 1 > $.
             $v n $.
 
             num_n $f num n $.
@@ -433,7 +496,7 @@ mod tests {
     #[test]
     fn happy_with_two_vars() {
         let file = "
-            $c num happy 0 1 > $.
+            $c true num happy 0 1 > < $.
             $v n m $.
 
             num_n $f num n $.
@@ -485,7 +548,7 @@ mod tests {
         #[test]
         fn does_not_require_from_other_frames() {
             let file = "
-                $c num happy sad 0 1 > = $.
+                $c true num happy sad 0 1 > = $.
                 $v n $.
 
                 num_n $f num n $.
@@ -507,7 +570,28 @@ mod tests {
             ";
 
             let frame = compile(parse(file).unwrap()).unwrap();
-            assert_eq!(frame.ops["num_happy"].hypotheses, vec!["is_gt_ze"]);
+            assert_eq!(
+                frame.get_op("num_happy").unwrap().hypotheses,
+                vec![Label::from("is_gt_ze".to_string())]
+            );
+        }
+
+        #[test]
+        fn undefined_symbol() {
+            let file = "
+                $c |- ( ) $.
+
+                ${
+                  foo $e |- ( ph -> -. ps ) $.
+                  axiom $p |- ( ph -> ( ps -> ch ) ) $=
+                    ( wn ) ACBABECEDFG $.
+                $}
+            ";
+
+            assert_eq!(
+                compile(parse(file).unwrap()),
+                Err(Error::UnrecognizedSymbol("ph".to_string()))
+            );
         }
     }
 }
